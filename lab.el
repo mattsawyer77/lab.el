@@ -61,6 +61,11 @@
   :type 'string
   :group 'lab)
 
+(defcustom lab-token-env-var
+  nil "environment variable containing GitLab API token -- an alternative to setting it in `lab-token`"
+  :type 'string
+  :group 'lab)
+
 (defcustom lab-host
   "https://gitlab.com"
   "GitLab host, like `https://gitlab.mycompany.com'."
@@ -738,46 +743,49 @@ Examples:
   ;; url parameters
   (setq params (lab--plist-remove-keys-with-prefix ":%" params))
 
-  (let (json (all-items '()) (lastid t))
-    (while lastid
-      (request
-        (thread-last
-          (format "%s/api/v4/%s" lab-host endpoint)
-          (s-replace "#{group}" (url-hexify-string lab-group))
-          (s-replace "#{project}" (lab--project-path)))
-        :type %type
-        :headers `((Authorization . ,(format "Bearer %s" lab-token)) ,@%headers)
-        :parser (if %raw?
-                    #'buffer-string
-                  (apply-partially
-                   #'json-parse-buffer
-                   :object-type 'alist :array-type 'list))
-        :success (cl-function
+  (let ((json (all-items '()) (lastid t))
+        (token (if (eq lab-token nil) (getenv lab-token-env-var))))
+    (if (eq token nil)
+        (error ">> lab--request failed with %s" data)
+      (while lastid
+        (request
+          (thread-last
+            (format "%s/api/v4/%s" lab-host endpoint)
+            (s-replace "#{group}" (url-hexify-string lab-group))
+            (s-replace "#{project}" (lab--project-path)))
+          :type %type
+          :headers `((Authorization . ,(format "Bearer %s" token)) ,@%headers)
+          :parser (if %raw?
+                      #'buffer-string
+                    (apply-partially
+                     #'json-parse-buffer
+                     :object-type 'alist :array-type 'list))
+          :success (cl-function
+                    (lambda (&key data &allow-other-keys)
+                      (unless %async
+                        (setq json data)
+                        (when %collect-all?
+                          (setq all-items `(,@all-items ,@json))))
+                      (when %success
+                        (funcall %success data))))
+          :error (cl-function
                   (lambda (&key data &allow-other-keys)
-                    (unless %async
-                      (setq json data)
-                      (when %collect-all?
-                        (setq all-items `(,@all-items ,@json))))
-                    (when %success
-                      (funcall %success data))))
-        :error (cl-function
-                (lambda (&key data &allow-other-keys)
-                  (error ">> lab--request failed with %s" data)))
-        :sync (not %async)
-        :data (lab--plist-to-alist %data)
-        :params `(,@(when %collect-all?
-                      `(("per_page" . ,lab--max-per-page-result-count)
-                        ("order_by" . "id")
-                        ("sort" . "asc")
-                        ("pagination" . "keyset")))
-                  ,@(when (and %collect-all? (not (eq lastid t)))
-                      `(("id_after" . ,lastid)))
-                  ,@(unless %collect-all?
-                      `(("per_page" . ,lab-result-count)))
-                  ,@(lab--plist-to-alist params)))
-      (setq lastid
-            (when (and %collect-all? (lab--length= json lab--max-per-page-result-count))
-              (alist-get 'id (lab-last-item json)))))
+                    (error ">> lab--request failed with %s" data)))
+          :sync (not %async)
+          :data (lab--plist-to-alist %data)
+          :params `(,@(when %collect-all?
+                        `(("per_page" . ,lab--max-per-page-result-count)
+                          ("order_by" . "id")
+                          ("sort" . "asc")
+                          ("pagination" . "keyset")))
+                    ,@(when (and %collect-all? (not (eq lastid t)))
+                        `(("id_after" . ,lastid)))
+                    ,@(unless %collect-all?
+                        `(("per_page" . ,lab-result-count)))
+                    ,@(lab--plist-to-alist params)))
+        (setq lastid
+              (when (and %collect-all? (lab--length= json lab--max-per-page-result-count))
+                (alist-get 'id (lab-last-item json))))))
     (if %collect-all? all-items json)))
 
 (defun lab--open-web-url (url)
